@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 import requests
 import datetime
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = FastAPI()
 
@@ -18,15 +19,20 @@ tournaments = [
     {"name": "Championship", "id": 2},
 ]
 
+# Cache for daily refresh
+cache = {"matches": {}}
+
+
 def get_url_data(url):
-    """Fetch and parse JSON from a given URL"""
+    """Fetch and parse JSON from SofaScore"""
     try:
-        r = requests.get(url)
+        r = requests.get(url, timeout=10)
         if r.status_code == 200:
             return r.json()
     except Exception as e:
         print("❌ Error:", e)
     return {}
+
 
 def format_event(event):
     """Simplify SofaScore event data"""
@@ -40,35 +46,26 @@ def format_event(event):
         "home": {
             "name": event["homeTeam"]["name"],
             "logo": f"https://api.sofascore.app/api/v1/team/{event['homeTeam']['id']}/image",
-            "score": event.get("homeScore", {}).get("current")
+            "score": event.get("homeScore", {}).get("current"),
         },
         "away": {
             "name": event["awayTeam"]["name"],
             "logo": f"https://api.sofascore.app/api/v1/team/{event['awayTeam']['id']}/image",
-            "score": event.get("awayScore", {}).get("current")
-        }
+            "score": event.get("awayScore", {}).get("current"),
+        },
     }
 
-@app.get("/")
-def root():
-    return {"message": "⚽ SofaScore Football API is running!"}
 
-@app.get("/tournaments")
-def get_tournaments():
-    """Return all tournaments"""
-    return tournaments
+def fetch_matches(tournament_id):
+    """Fetch matches for one tournament"""
+    seasons = get_url_data(f"{BASE_URL}/tournament/{tournament_id}/seasons")
+    if "seasons" not in seasons or not seasons["seasons"]:
+        return {"live": [], "upcoming": [], "finished": []}
 
-@app.get("/matches/{tournament_id}")
-def matches(tournament_id: int, season_id: int = None):
-    """Return live, upcoming, finished matches for one tournament"""
-    if not season_id:
-        seasons = get_url_data(f"{BASE_URL}/tournament/{tournament_id}/seasons")
-        if "seasons" not in seasons:
-            return {"error": "No seasons found"}
-        season_id = seasons["seasons"][0]["id"]
-
+    season_id = seasons["seasons"][0]["id"]
     url = f"{BASE_URL}/tournament/{tournament_id}/season/{season_id}/events"
     data = get_url_data(url)
+
     if "events" not in data:
         return {"live": [], "upcoming": [], "finished": []}
 
@@ -78,17 +75,45 @@ def matches(tournament_id: int, season_id: int = None):
     finished = [e for e in events if e["status"].lower() in ["ended", "finished", "after penalties"]]
     upcoming = [e for e in events if e["status"].lower() in ["not started", "scheduled"]]
 
-    return {
-        "tournament_id": tournament_id,
-        "live": live,
-        "upcoming": upcoming,
-        "finished": finished
-    }
+    return {"live": live, "upcoming": upcoming, "finished": finished}
+
+
+def refresh_all_matches():
+    """Update cache for all tournaments"""
+    print("🔄 Refreshing matches from SofaScore...")
+    all_matches = {}
+    for t in tournaments:
+        all_matches[t["name"]] = fetch_matches(t["id"])
+    cache["matches"] = all_matches
+    print("✅ Cache updated!")
+
+
+# --- Scheduler: run every day at 06:00 ---
+scheduler = BackgroundScheduler()
+scheduler.add_job(refresh_all_matches, "cron", hour=6, minute=0)
+scheduler.start()
+
+# Run once at startup
+refresh_all_matches()
+
+
+@app.get("/")
+def root():
+    return {"message": "⚽ SofaScore Football API is running!"}
+
+
+@app.get("/tournaments")
+def get_tournaments():
+    return tournaments
+
+
+@app.get("/matches/{tournament_id}")
+def matches(tournament_id: int):
+    """Get matches for one tournament"""
+    return fetch_matches(tournament_id)
+
 
 @app.get("/matches/all")
 def matches_all():
-    """Return matches for all tournaments"""
-    all_matches = {}
-    for t in tournaments:
-        all_matches[t["name"]] = matches(t["id"])
-    return all_matches
+    """Get matches for all tournaments (from cache)"""
+    return cache["matches"]
