@@ -1,65 +1,49 @@
-# main.py
 from fastapi import FastAPI
 import requests
-from datetime import date, timedelta
+from datetime import datetime
 
-app = FastAPI(
-    title="SwiftScore API",
-    description="Get live, upcoming, and finished football matches from SofaScore",
-    version="1.0.0"
-)
+app = FastAPI()
 
-BASE_URL = "https://api.sofascore.com/api/v1/sport/football"
+# Replace with your API key + endpoint
+API_KEY = "YOUR_API_KEY"
+BASE_URL = "https://livescore-api.com/api-client/matches/live.json"
 
-def format_match(match: dict) -> dict:
-    """Format a single match into clean JSON."""
-    return {
-        "id": match.get("id"),
-        "tournament": match.get("tournament", {}).get("name"),
-        "home": match.get("homeTeam", {}).get("name"),
-        "away": match.get("awayTeam", {}).get("name"),
-        "status": match.get("status", {}).get("description"),
-        "startTime": match.get("startTimestamp"),
-        "score": {
-            "home": match.get("homeScore", {}).get("current"),
-            "away": match.get("awayScore", {}).get("current"),
+def fetch_matches():
+    url = f"{BASE_URL}?key={API_KEY}"
+    resp = requests.get(url)
+    data = resp.json()
+
+    if not data.get("success"):
+        return {"live": [], "upcoming": [], "finished": []}
+
+    matches = data.get("data", {}).get("match", [])
+
+    live, upcoming, finished = [], [], []
+
+    for m in matches:
+        status = m.get("status", "").upper()
+
+        match_data = {
+            "id": m.get("id"),
+            "home": m["home"]["name"],
+            "away": m["away"]["name"],
+            "score": m["scores"]["score"] if "scores" in m else None,
+            "time": m.get("time"),
+            "competition": m["competition"]["name"] if "competition" in m else None,
+            "status": status,
+            "home_logo": m["home"]["logo"],
+            "away_logo": m["away"]["logo"]
         }
-    }
+
+        if status in ["IN PLAY", "ADDED TIME", "1ST HALF", "2ND HALF"]:
+            live.append(match_data)
+        elif status == "FINISHED":
+            finished.append(match_data)
+        else:
+            upcoming.append(match_data)
+
+    return {"live": live, "upcoming": upcoming, "finished": finished}
 
 @app.get("/matches")
-def get_matches(days: int = 3):
-    """
-    Fetch live, upcoming, and finished matches.
-    - days: how many days forward/backward to fetch (default 3).
-    """
-    results = {"live": [], "upcoming": [], "finished": []}
-
-    # 🔴 LIVE MATCHES
-    try:
-        live_url = f"{BASE_URL}/events/live"
-        live_data = requests.get(live_url).json()
-        results["live"] = [format_match(m) for m in live_data.get("events", [])]
-    except Exception as e:
-        print("Error fetching live matches:", e)
-
-    # 🔵 UPCOMING MATCHES (today + next N days)
-    for i in range(0, days):
-        try:
-            day = (date.today() + timedelta(days=i)).strftime("%Y-%m-%d")
-            url = f"{BASE_URL}/scheduled-events/{day}"
-            data = requests.get(url).json()
-            results["upcoming"].extend([format_match(m) for m in data.get("events", [])])
-        except Exception as e:
-            print(f"Error fetching upcoming matches for {day}:", e)
-
-    # 🟢 FINISHED MATCHES (yesterday - N days)
-    for i in range(1, days + 1):
-        try:
-            day = (date.today() - timedelta(days=i)).strftime("%Y-%m-%d")
-            url = f"{BASE_URL}/scheduled-events/{day}"
-            data = requests.get(url).json()
-            results["finished"].extend([format_match(m) for m in data.get("events", [])])
-        except Exception as e:
-            print(f"Error fetching finished matches for {day}:", e)
-
-    return results
+def get_matches():
+    return fetch_matches()
