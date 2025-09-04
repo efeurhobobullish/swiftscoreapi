@@ -1,75 +1,72 @@
-import requests
 import datetime
-import json
+import requests
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-
-# 🎯 Supported tournaments (filter only these)
-TOURNAMENTS = [
-    {"name": "Champions League", "id": 1462},
-    {"name": "Europa League", "id": 10908},
-    {"name": "Premier League", "id": 1},
-    {"name": "Bundesliga", "id": 42},
-    {"name": "Brasileirão", "id": 83},
-    {"name": "La Liga", "id": 36},
-    {"name": "Serie A Tim", "id": 33},
-    {"name": "Championship", "id": 2},
-]
 
 app = FastAPI()
 
-def get_today_matches():
+# Allow frontend (adjust origin if needed)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Fake browser headers to bypass 403
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.sofascore.com",
+    "Origin": "https://www.sofascore.com",
+}
+
+def fetch_matches():
+    """Fetch all matches for today from SofaScore and categorize them."""
     today = datetime.date.today().strftime("%Y-%m-%d")
     url = f"https://api.sofascore.com/api/v1/sport/football/scheduled-events/{today}"
 
     try:
-        res = requests.get(url, timeout=10)
+        res = requests.get(url, headers=HEADERS, timeout=10)
         res.raise_for_status()
+        data = res.json()
+
+        live, upcoming, finished = [], [], []
+
+        for event in data.get("events", []):
+            match = {
+                "id": event["id"],
+                "tournament": event["tournament"]["name"],
+                "homeTeam": event["homeTeam"]["name"],
+                "awayTeam": event["awayTeam"]["name"],
+                "homeScore": event["homeScore"].get("current"),
+                "awayScore": event["awayScore"].get("current"),
+                "status": event["status"]["description"],
+                "startTime": datetime.datetime.fromtimestamp(event["startTimestamp"]).strftime("%Y-%m-%d %H:%M"),
+            }
+
+            # Categorize
+            if event["status"]["type"] == "inprogress":
+                live.append(match)
+            elif event["status"]["type"] == "finished":
+                finished.append(match)
+            else:
+                upcoming.append(match)
+
+        return {"live": live, "upcoming": upcoming, "finished": finished}
+
     except Exception as e:
         return {"error": f"Failed to fetch data: {e}"}
 
-    data = res.json()
-    events = data.get("events", [])
 
-    allowed_ids = {t["id"]: t["name"] for t in TOURNAMENTS}
-    live, upcoming, finished = [], [], []
+@app.get("/api/matches")
+def get_matches():
+    """API endpoint to get today's matches separated into live, upcoming, and finished."""
+    return fetch_matches()
 
-    for e in events:
-        tournament_id = e["tournament"]["uniqueTournament"]["id"]
-        if tournament_id not in allowed_ids:
-            continue
 
-        match = {
-            "id": e["id"],
-            "tournament": allowed_ids[tournament_id],
-            "time": datetime.datetime.fromtimestamp(e["startTimestamp"]).strftime("%Y-%m-%d %H:%M"),
-            "homeTeam": e["homeTeam"]["name"],
-            "awayTeam": e["awayTeam"]["name"],
-            "homeScore": e["homeScore"].get("current"),
-            "awayScore": e["awayScore"].get("current"),
-            "status": e["status"]["description"]
-        }
-
-        code = e["status"]["code"]
-        if code == 100:  # finished
-            finished.append(match)
-        elif code == 0:  # upcoming
-            upcoming.append(match)
-        else:  # live
-            live.append(match)
-
-    return {"live": live, "upcoming": upcoming, "finished": finished}
-
-# 🖥️ API endpoint
-@app.get("/matches")
-def matches():
-    return JSONResponse(content=get_today_matches())
-
-# 🖥️ Run as standalone script OR API
 if __name__ == "__main__":
-    # Run FastAPI app on localhost:8000
-    print("🚀 Starting FastAPI server at http://127.0.0.1:8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-    # OR, to just print matches instead of running API, uncomment below:
-    # print(json.dumps(get_today_matches(), indent=2, ensure_ascii=False))
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
