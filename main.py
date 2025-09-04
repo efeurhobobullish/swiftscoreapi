@@ -1,49 +1,94 @@
 from fastapi import FastAPI
 import requests
-from datetime import datetime
+import datetime
 
 app = FastAPI()
 
-# Replace with your API key + endpoint
-API_KEY = "YOUR_API_KEY"
-BASE_URL = "https://livescore-api.com/api-client/matches/live.json"
+BASE_URL = "https://api.sofascore.com/api/v1"
 
-def fetch_matches():
-    url = f"{BASE_URL}?key={API_KEY}"
-    resp = requests.get(url)
-    data = resp.json()
+# Predefined tournaments
+tournaments = [
+    {"name": "Champions League", "id": 1462},
+    {"name": "Europa League", "id": 10908},
+    {"name": "Premier League", "id": 1},
+    {"name": "Bundesliga", "id": 42},
+    {"name": "Brasileirão", "id": 83},
+    {"name": "La Liga", "id": 36},
+    {"name": "Serie A Tim", "id": 33},
+    {"name": "Championship", "id": 2},
+]
 
-    if not data.get("success"):
+def get_url_data(url):
+    """Fetch and parse JSON from a given URL"""
+    try:
+        r = requests.get(url)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        print("❌ Error:", e)
+    return {}
+
+def format_event(event):
+    """Simplify SofaScore event data"""
+    return {
+        "id": event.get("id"),
+        "tournament": event.get("tournament", {}).get("name"),
+        "start": datetime.datetime.fromtimestamp(
+            event["startTimestamp"]
+        ).strftime("%Y-%m-%d %H:%M"),
+        "status": event["status"]["description"],
+        "home": {
+            "name": event["homeTeam"]["name"],
+            "logo": f"https://api.sofascore.app/api/v1/team/{event['homeTeam']['id']}/image",
+            "score": event.get("homeScore", {}).get("current")
+        },
+        "away": {
+            "name": event["awayTeam"]["name"],
+            "logo": f"https://api.sofascore.app/api/v1/team/{event['awayTeam']['id']}/image",
+            "score": event.get("awayScore", {}).get("current")
+        }
+    }
+
+@app.get("/")
+def root():
+    return {"message": "⚽ SofaScore Football API is running!"}
+
+@app.get("/tournaments")
+def get_tournaments():
+    """Return all tournaments"""
+    return tournaments
+
+@app.get("/matches/{tournament_id}")
+def matches(tournament_id: int, season_id: int = None):
+    """Return live, upcoming, finished matches for one tournament"""
+    if not season_id:
+        seasons = get_url_data(f"{BASE_URL}/tournament/{tournament_id}/seasons")
+        if "seasons" not in seasons:
+            return {"error": "No seasons found"}
+        season_id = seasons["seasons"][0]["id"]
+
+    url = f"{BASE_URL}/tournament/{tournament_id}/season/{season_id}/events"
+    data = get_url_data(url)
+    if "events" not in data:
         return {"live": [], "upcoming": [], "finished": []}
 
-    matches = data.get("data", {}).get("match", [])
+    events = [format_event(e) for e in data["events"]]
 
-    live, upcoming, finished = [], [], []
+    live = [e for e in events if e["status"].lower() == "live"]
+    finished = [e for e in events if e["status"].lower() in ["ended", "finished", "after penalties"]]
+    upcoming = [e for e in events if e["status"].lower() in ["not started", "scheduled"]]
 
-    for m in matches:
-        status = m.get("status", "").upper()
+    return {
+        "tournament_id": tournament_id,
+        "live": live,
+        "upcoming": upcoming,
+        "finished": finished
+    }
 
-        match_data = {
-            "id": m.get("id"),
-            "home": m["home"]["name"],
-            "away": m["away"]["name"],
-            "score": m["scores"]["score"] if "scores" in m else None,
-            "time": m.get("time"),
-            "competition": m["competition"]["name"] if "competition" in m else None,
-            "status": status,
-            "home_logo": m["home"]["logo"],
-            "away_logo": m["away"]["logo"]
-        }
-
-        if status in ["IN PLAY", "ADDED TIME", "1ST HALF", "2ND HALF"]:
-            live.append(match_data)
-        elif status == "FINISHED":
-            finished.append(match_data)
-        else:
-            upcoming.append(match_data)
-
-    return {"live": live, "upcoming": upcoming, "finished": finished}
-
-@app.get("/matches")
-def get_matches():
-    return fetch_matches()
+@app.get("/matches/all")
+def matches_all():
+    """Return matches for all tournaments"""
+    all_matches = {}
+    for t in tournaments:
+        all_matches[t["name"]] = matches(t["id"])
+    return all_matches
